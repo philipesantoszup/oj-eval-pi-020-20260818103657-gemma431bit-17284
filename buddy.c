@@ -9,6 +9,7 @@
 
 typedef struct free_block {
     struct free_block *next;
+    struct free_block *prev;
 } free_block_t;
 
 static free_block_t *free_lists[MAX_RANK + 1];
@@ -25,6 +26,19 @@ static int get_page_index(void *p) {
     int idx = offset / PAGE_SIZE;
     if (idx < 0 || idx >= total_pages) return -1;
     return idx;
+}
+
+static void list_remove(int rank, free_block_t *block) {
+    if (block->prev) block->prev->next = block->next;
+    else free_lists[rank] = block->next;
+    if (block->next) block->next->prev = block->prev;
+}
+
+static void list_add(int rank, free_block_t *block) {
+    block->next = free_lists[rank];
+    block->prev = NULL;
+    if (free_lists[rank]) free_lists[rank]->prev = block;
+    free_lists[rank] = block;
 }
 
 int init_page(void *p, int pgcount) {
@@ -50,8 +64,7 @@ int init_page(void *p, int pgcount) {
             int size = (1 << (rank - 1));
             if (remaining >= size && (offset % size == 0)) {
                 free_block_t *block = (free_block_t *)((char *)base_ptr + (size_t)offset * PAGE_SIZE);
-                block->next = free_lists[rank];
-                free_lists[rank] = block;
+                list_add(rank, block);
                 page_ranks[offset] = rank;
                 offset += size;
                 remaining -= size;
@@ -71,14 +84,13 @@ void *alloc_pages(int rank) {
     for (int r = rank; r <= MAX_RANK; r++) {
         if (free_lists[r]) {
             free_block_t *block = free_lists[r];
-            free_lists[r] = block->next;
+            list_remove(r, block);
 
             while (r > rank) {
                 r--;
                 int size = (1 << (r - 1));
                 free_block_t *buddy = (free_block_t *)((char *)block + (size_t)size * PAGE_SIZE);
-                buddy->next = free_lists[r];
-                free_lists[r] = buddy;
+                list_add(r, buddy);
                 page_ranks[get_page_index(buddy)] = r;
             }
 
@@ -107,27 +119,15 @@ int return_pages(void *p) {
         if (buddy_idx < 0 || buddy_idx >= total_pages) break;
         if (page_allocated[buddy_idx] || page_ranks[buddy_idx] != rank) break;
 
-        free_block_t **prev = &free_lists[rank];
-        free_block_t *curr = free_lists[rank];
-        bool found = false;
-        while (curr) {
-            if (curr == (void *)((char *)base_ptr + (size_t)buddy_idx * PAGE_SIZE)) {
-                *prev = curr->next;
-                found = true;
-                break;
-            }
-            prev = &curr->next;
-            curr = curr->next;
-        }
-        if (!found) break;
+        free_block_t *buddy = (free_block_t *)((char *)base_ptr + (size_t)buddy_idx * PAGE_SIZE);
+        list_remove(rank, buddy);
 
         idx = idx & ~size;
         rank++;
     }
 
     free_block_t *block = (free_block_t *)((char *)base_ptr + (size_t)idx * PAGE_SIZE);
-    block->next = free_lists[rank];
-    free_lists[rank] = block;
+    list_add(rank, block);
     page_ranks[idx] = rank;
 
     return OK;
