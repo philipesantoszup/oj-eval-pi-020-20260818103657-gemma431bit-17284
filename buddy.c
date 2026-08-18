@@ -14,8 +14,8 @@ typedef struct free_block {
 static free_block_t *free_lists[MAX_RANK + 1];
 static void *base_ptr = NULL;
 static int total_pages = 0;
-static unsigned char *page_ranks = NULL; // rank of the block starting at this page
-static bool *page_allocated = NULL;      // whether the page is the start of an allocated block
+static unsigned char *page_ranks = NULL;
+static bool *page_allocated = NULL;
 
 static int get_page_index(void *p) {
     if (base_ptr == NULL) return -1;
@@ -42,31 +42,6 @@ int init_page(void *p, int pgcount) {
 
     if (!page_ranks || !page_allocated) return -EINVAL;
 
-    // Initialize the memory pool with the largest possible blocks
-    int current_pg = 0;
-    while (current_pg < total_pages) {
-        int rank = MAX_RANK;
-        while (rank > 1) {
-            int size = (1 << (rank - 1));
-            if (current_pg + size <= total_pages && (current_pg % (1 << (rank - 1)) == 0)) {
-                // This block could be of this rank, but we want the largest possible
-                // and the buddy system requires the block to be aligned to its size.
-                // Actually, we just need to find the largest rank that fits and is aligned.
-                break; 
-            }
-            rank--;
-        }
-        
-        // To correctly implement buddy, we start with the largest power-of-2 blocks.
-        // But the problem says pgcount can be any number?
-        // Wait, the buddy system typically starts with a power-of-2 pool.
-        // If pgcount is not a power of 2, we can still use it by breaking it into 
-        // the largest possible power-of-2 aligned blocks.
-        break; 
-    }
-    
-    // Let's restart the initialization logic.
-    // We fill the pool by taking the largest possible rank that fits and is aligned.
     int remaining = total_pages;
     int offset = 0;
     while (remaining > 0) {
@@ -74,12 +49,10 @@ int init_page(void *p, int pgcount) {
         while (rank >= 1) {
             int size = (1 << (rank - 1));
             if (remaining >= size && (offset % size == 0)) {
-                // Found the largest power-of-2 block that fits and is aligned.
                 free_block_t *block = (free_block_t *)((char *)base_ptr + (size_t)offset * PAGE_SIZE);
                 block->next = free_lists[rank];
                 free_lists[rank] = block;
                 page_ranks[offset] = rank;
-                
                 offset += size;
                 remaining -= size;
                 goto next_block;
@@ -95,14 +68,11 @@ int init_page(void *p, int pgcount) {
 void *alloc_pages(int rank) {
     if (rank < 1 || rank > MAX_RANK) return ERR_PTR(-EINVAL);
 
-    // Look for a block of the requested rank or higher
     for (int r = rank; r <= MAX_RANK; r++) {
         if (free_lists[r]) {
-            // Found a block!
             free_block_t *block = free_lists[r];
             free_lists[r] = block->next;
 
-            // Split the block until we reach the desired rank
             while (r > rank) {
                 r--;
                 int size = (1 << (r - 1));
@@ -130,7 +100,6 @@ int return_pages(void *p) {
     int rank = page_ranks[idx];
     page_allocated[idx] = false;
 
-    // Try to merge with the buddy
     while (rank < MAX_RANK) {
         int size = (1 << (rank - 1));
         int buddy_idx = idx ^ size;
@@ -138,8 +107,6 @@ int return_pages(void *p) {
         if (buddy_idx < 0 || buddy_idx >= total_pages) break;
         if (page_allocated[buddy_idx] || page_ranks[buddy_idx] != rank) break;
 
-        // Buddy is free and has the same rank, so we can merge.
-        // Remove buddy from the free list.
         free_block_t **prev = &free_lists[rank];
         free_block_t *curr = free_lists[rank];
         bool found = false;
@@ -152,15 +119,12 @@ int return_pages(void *p) {
             prev = &curr->next;
             curr = curr->next;
         }
+        if (!found) break;
 
-        if (!found) break; // Should not happen if buddy system is consistent
-
-        // Merge
-        idx = idx & ~size; // Buddy could be to the left or right
+        idx = idx & ~size;
         rank++;
     }
 
-    // Add the final merged block back to the free list
     free_block_t *block = (free_block_t *)((char *)base_ptr + (size_t)idx * PAGE_SIZE);
     block->next = free_lists[rank];
     free_lists[rank] = block;
